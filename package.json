@@ -1,0 +1,9 @@
+{
+  "name": "hintonbuildings",
+  "private": true,
+  "scripts": {
+    "test": "php wordpress/hb-utm-tracker/tests/php/run.php && find wordpress/hb-utm-tracker -name '*.php' -print0 | xargs -0 -n1 php -l && node --test wordpress/hb-utm-tracker/tests/js/*.test.js && node wordpress/hb-utm-tracker/scripts/build-standalone.js --check",
+    "build:snippet": "node wordpress/hb-utm-tracker/scripts/build-standalone.js",
+    "build:zip": "sh wordpress/hb-utm-tracker/scripts/build-zip.sh"
+  }
+}
