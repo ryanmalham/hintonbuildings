@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: PHP syntax
+        run: find wordpress/hb-utm-tracker -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: PHP unit tests
+        run: php wordpress/hb-utm-tracker/tests/php/run.php
+      - name: JavaScript unit tests
+        run: node --test wordpress/hb-utm-tracker/tests/js/*.test.js
+      - name: Standalone snippet is current
+        run: node wordpress/hb-utm-tracker/scripts/build-standalone.js --check
