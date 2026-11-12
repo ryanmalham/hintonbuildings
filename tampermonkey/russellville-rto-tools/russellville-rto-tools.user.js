@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Russellville RTO Tools (Hinton Buildings)
 // @namespace    https://hintonbuildings.com
-// @version      2.1.0
-// @description  One script for russellville.rtocontracts.com. Contracts: Extra Hauling at $3.00/mile over 60 from Rich Square. Manufacturer sales: 50% deposit incl. tax, Coastal deck serial builder, county dropdown, NCDOR tax rate fill, and a Create quote PDF button.
+// @version      2.2.0
+// @description  One script for russellville.rtocontracts.com. Contracts: Extra Hauling at $3.00/mile over 60 from Rich Square. Manufacturer sales: 50% deposit incl. tax, Coastal deck serial builder, county dropdown, NCDOR tax rate fill, and a Create quote PDF button with a post-tax delivery fee over 60 miles.
 // @author       Hinton Buildings
 // @match        https://russellville.rtocontracts.com/contracts/new*
 // @match        https://russellville.rtocontracts.com/contracts/*/edit*
@@ -600,6 +600,105 @@
   }
 
 
+  // ---------- Delivery fee (quote only, after tax) ----------
+  const FACTORY = { label: '3503 Hwy 305, Rich Square, NC 27869', lon: -77.300566934806, lat: 36.2841669196 };
+  const FREE_MILES_Q = 60, PER_MILE_Q = 3.0;
+  const dState = { miles: null, key: '', seq: 0, status: '' };
+
+  function hbRequest(url, headers) {
+    const fn = (typeof GM !== 'undefined' && GM.xmlHttpRequest) || (typeof GM_xmlhttpRequest !== 'undefined' && GM_xmlhttpRequest);
+    if (!fn) return Promise.reject(new Error('Tampermonkey request permission missing'));
+    return new Promise((resolve, reject) => {
+      fn({ method: 'GET', url, headers: headers || {}, timeout: 15000,
+        onload: (r) => (r.status >= 200 && r.status < 300 ? resolve(r.responseText) : reject(new Error('HTTP ' + r.status))),
+        onerror: () => reject(new Error('Network error')), ontimeout: () => reject(new Error('Timed out')) });
+    });
+  }
+
+  function deliveryAddress() {
+    const p = 'manufacturer_sale_physical_address_attributes_';
+    const g = (k) => { const el = document.getElementById(p + k); return el ? String(el.value || '').trim() : ''; };
+    const l1 = g('address_line_1'), city = g('city'), st = g('state_province') || 'NC', zip = g('postal_code');
+    if (!l1 || !city || !/^\d{5}(-\d{4})?$/.test(zip)) return '';
+    return [l1, city, st + ' ' + zip, 'US'].join(', ');
+  }
+
+  async function hbGeocode(addr) {
+    try {
+      const d = JSON.parse(await hbRequest('https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?address=' + encodeURIComponent(addr) + '&benchmark=Public_AR_Current&format=json'));
+      const m = d && d.result && d.result.addressMatches && d.result.addressMatches[0];
+      if (m && m.coordinates) return { lon: m.coordinates.x, lat: m.coordinates.y };
+    } catch (e) { /* fall through */ }
+    const d2 = JSON.parse(await hbRequest('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(addr), { Accept: 'application/json' }));
+    if (Array.isArray(d2) && d2[0]) return { lon: parseFloat(d2[0].lon), lat: parseFloat(d2[0].lat) };
+    throw new Error('Address not found');
+  }
+
+  async function hbDrivingMiles(dest) {
+    const d = JSON.parse(await hbRequest('https://router.project-osrm.org/route/v1/driving/' + FACTORY.lon + ',' + FACTORY.lat + ';' + dest.lon + ',' + dest.lat + '?overview=false'));
+    if (!d || d.code !== 'Ok' || !d.routes || !d.routes[0]) throw new Error('No driving route');
+    return d.routes[0].distance / 1609.344;
+  }
+
+  function deliveryFeeFor(miles) {
+    const rounded = Math.round(miles);
+    const over = Math.max(0, rounded - FREE_MILES_Q);
+    return { rounded, over, fee: round2(over * PER_MILE_Q) };
+  }
+
+  function setDeliveryStatus(text, color) {
+    const s = document.getElementById('hb-delivery-status');
+    if (s) { s.textContent = text; s.style.color = color || '#333'; }
+    dState.status = text;
+  }
+
+  async function computeDelivery(force) {
+    const addr = deliveryAddress();
+    const feeEl = document.getElementById('hb-delivery-fee');
+    if (!addr) { setDeliveryStatus('Enter the full delivery address to figure the delivery fee.', '#b00020'); return; }
+    if (!force && addr === dState.key && dState.miles != null) return;
+    const seq = ++dState.seq;
+    setDeliveryStatus('Figuring driving distance from Rich Square...', '#333');
+    try {
+      const miles = await hbDrivingMiles(await hbGeocode(addr));
+      if (seq !== dState.seq) return;
+      dState.miles = miles; dState.key = addr;
+      const f = deliveryFeeFor(miles);
+      if (feeEl) { feeEl.value = f.fee.toFixed(2); feeEl.dataset.auto = feeEl.value; }
+      setDeliveryStatus(f.rounded + ' driving miles from the factory. ' + (f.over ? f.over + ' over 60 at $3.00/mi = $' + money(f.fee) : 'Within 60 miles, no delivery fee.'), '#1a7f37');
+    } catch (e) {
+      if (seq !== dState.seq) return;
+      dState.miles = null;
+      setDeliveryStatus('Could not figure distance (' + e.message + '). Type the delivery fee in the box.', '#b00020');
+    }
+  }
+
+  function addDeliveryRow() {
+    const anchor = $('#manufacturer_sale_final_payment') || $('#manufacturer_sale_initial_payment');
+    if (!anchor || document.getElementById('hb-delivery-fee')) return;
+    const box = document.createElement('div');
+    box.style.cssText = 'margin:8px 0 12px;padding:10px;border:2px solid #0b3d91;border-radius:8px;';
+    box.innerHTML = '<label for="hb-delivery-fee" style="display:block;font-weight:bold;font-size:15px;margin-bottom:6px;">Delivery fee for quote (over 60 miles from Rich Square, after tax)</label>' +
+      '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;"><span style="font-size:16px;">$</span>' +
+      '<input id="hb-delivery-fee" type="number" step="0.01" min="0" value="0.00" style="font-size:16px;min-height:44px;width:140px;padding:6px;">' +
+      '<button type="button" id="hb-delivery-btn" style="background:#0b3d91;color:#fff;border:0;border-radius:6px;padding:10px 14px;font-size:15px;min-height:44px;cursor:pointer;">Recalculate</button></div>' +
+      '<div id="hb-delivery-status" style="font-size:14px;margin-top:6px;"></div>';
+    anchor.insertAdjacentElement('afterend', box);
+    document.getElementById('hb-delivery-btn').addEventListener('click', () => computeDelivery(true));
+    let t;
+    ['address_line_1', 'city', 'postal_code', 'state_province'].forEach((k) => {
+      const el = document.getElementById('manufacturer_sale_physical_address_attributes_' + k);
+      if (el) el.addEventListener('change', () => { clearTimeout(t); t = setTimeout(() => computeDelivery(false), 800); });
+    });
+    computeDelivery(false);
+  }
+
+  function currentDelivery() {
+    const el = document.getElementById('hb-delivery-fee');
+    const fee = el ? parseFloat(el.value) : NaN;
+    return { fee: isNaN(fee) ? 0 : round2(fee), miles: dState.miles };
+  }
+
   // ---------- Quote PDF ----------
   const HINTON = {
     name: 'Hinton Buildings',
@@ -684,6 +783,7 @@
       design: val('manufacturer_sale_properties_external_link_Deck Visualizer'),
       base: num($('#manufacturer_sale_base_price')),
       cash, rate, tax, total,
+      deliveryFee: currentDelivery(),
       deposit: num($('#manufacturer_sale_initial_payment')),
       due: num($('#manufacturer_sale_final_payment')),
     };
@@ -750,9 +850,15 @@
     if (!isNaN(q.base) && q.base !== q.cash) body.push(['Base price', m$(q.base)]);
     body.push(['Price before tax', m$(q.cash)]);
     body.push(['Sales tax' + (isNaN(q.rate) ? '' : ' (' + q.rate.toFixed(2) + '%)'), m$(q.tax)]);
-    body.push(['Total', m$(q.total)]);
+    const dl = q.deliveryFee || { fee: 0 };
+    if (dl.fee > 0) {
+      const mi = dl.miles != null ? deliveryFeeFor(dl.miles) : null;
+      body.push(['Delivery fee' + (mi ? ' (' + mi.rounded + ' mi from factory, ' + mi.over + ' over 60 at $3.00/mi)' : ' (over 60 miles from factory)') + ', not taxed', m$(dl.fee)]);
+    }
+    const grand = !isNaN(q.total) ? round2(q.total + (dl.fee || 0)) : NaN;
+    body.push(['Total', m$(grand)]);
     if (!isNaN(q.deposit) && q.deposit > 0) body.push(['Deposit', m$(q.deposit)]);
-    if (!isNaN(q.deposit) && q.deposit > 0 && !isNaN(q.total)) body.push(['Balance due at delivery', m$(round2(q.total - q.deposit))]);
+    if (!isNaN(q.deposit) && q.deposit > 0 && !isNaN(q.total)) body.push(['Balance due at delivery', m$(round2(grand - q.deposit))]);
     doc.autoTable({
       startY: y, margin: { left: M, right: M },
       head: [['Pricing', 'Amount']],
@@ -783,8 +889,9 @@
     return doc;
   }
 
-  function makeQuote() {
+  async function makeQuote() {
     try {
+      if (deliveryAddress() && dState.miles == null && !(document.getElementById('hb-delivery-fee') || {}).dataset?.auto) await computeDelivery(true);
       const q = collectQuote();
       const doc = buildQuotePdf(q);
       const who = (q.customer || 'customer').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -822,6 +929,7 @@
     }
 
     countyDropdown();
+    addDeliveryRow();
     addQuoteButton();
     addSerialButton();
     applySerial(false);
