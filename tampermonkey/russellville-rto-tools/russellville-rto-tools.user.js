@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         Russellville RTO Tools (Hinton Buildings)
 // @namespace    https://hintonbuildings.com
-// @version      2.0.0
-// @description  One script for russellville.rtocontracts.com. Contracts: Extra Hauling at $3.00/mile over 60 from Rich Square. Manufacturer sales: 50% deposit incl. tax, Coastal deck serial builder, county dropdown, and NCDOR tax rate fill.
+// @version      2.1.0
+// @description  One script for russellville.rtocontracts.com. Contracts: Extra Hauling at $3.00/mile over 60 from Rich Square. Manufacturer sales: 50% deposit incl. tax, Coastal deck serial builder, county dropdown, NCDOR tax rate fill, and a Create quote PDF button.
 // @author       Hinton Buildings
 // @match        https://russellville.rtocontracts.com/contracts/new*
 // @match        https://russellville.rtocontracts.com/contracts/*/edit*
 // @match        https://russellville.rtocontracts.com/manufacturer_sales/new*
 // @match        https://russellville.rtocontracts.com/manufacturer_sales/*/edit*
+// @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js#sha256=mMzxeqEMILsTAXYmGPzJtqs6Tn8mtgcdZNC0EVTfOHU=
+// @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js#sha256=J6nDthhDxjErh/FC1A/nfA8PBUyfPN7MxL/V8zIoWcg=
 // @connect      geocoding.geo.census.gov
 // @connect      nominatim.openstreetmap.org
 // @connect      router.project-osrm.org
@@ -598,6 +600,209 @@
   }
 
 
+  // ---------- Quote PDF ----------
+  const HINTON = {
+    name: 'Hinton Buildings',
+    phone: '877-239-2506',
+    web: 'hintonbuildings.com',
+    lots: {
+      princeton: '9672 Hwy 70 East, Princeton, NC 27569',
+      dunn: '100 South Magnolia Ave, Dunn, NC 28334',
+      'la grange': '6608 Hwy 70 West, La Grange, NC 28551',
+    },
+  };
+
+  const val = (id) => {
+    const el = document.getElementById(id);
+    if (!el) return '';
+    if (el.tagName === 'SELECT') {
+      const o = el.options[el.selectedIndex];
+      return o && o.value ? o.text.trim() : '';
+    }
+    return String(el.value || '').trim();
+  };
+  const clean = (s) => (s && !/^n\/?a$/i.test(s) ? s : '');
+
+  function lotFor(dealer) {
+    const d = dealer.toLowerCase().replace(/lagrange/, 'la grange');
+    const k = Object.keys(HINTON.lots).find((x) => d.includes(x));
+    return k ? { label: k.replace(/\b\w/g, (c) => c.toUpperCase()), addr: HINTON.lots[k] } : null;
+  }
+
+  function addressLines(prefix) {
+    const p = 'manufacturer_sale_' + prefix + '_address_attributes_';
+    const l1 = val(p + 'address_line_1'), l2 = val(p + 'address_line_2');
+    const city = val(p + 'city'), zip = val(p + 'postal_code');
+    const stEl = document.getElementById(p + 'state_province');
+    const st = stEl ? (stEl.value || '') : '';
+    const cEl = document.getElementById(p + 'county');
+    const county = cEl ? String(cEl.value || '').trim() : '';
+    const out = [];
+    if (l1) out.push(l1);
+    if (l2) out.push(l2);
+    const cityLine = [city, [st, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    if (cityLine) out.push(cityLine);
+    if (county && county.toUpperCase() !== 'NC') out.push(county.replace(/\s+county$/i, '') + ' County');
+    return out;
+  }
+
+  function collectQuote() {
+    const cash = num($('#manufacturer_sale_cash_price'));
+    const rate = num($('#manufacturer_sale_sales_tax_rate'));
+    let tax = num($('#manufacturer_sale_sales_tax'));
+    if (!isNaN(cash) && !isNaN(rate)) tax = round2(cash * rate / 100);
+    const total = !isNaN(cash) && !isNaN(tax) ? round2(cash + tax) : num($('#manufacturer_sale_grand_total'));
+    const dealer = val('manufacturer_sale_dealer_name');
+    const usePhys = (document.getElementById('manufacturer_sale_use_physical_address_true') || {}).checked !== false;
+    return {
+      number: val('manufacturer_sale_number'),
+      date: val('manufacturer_sale_date'),
+      dealer, lot: lotFor(dealer),
+      salesperson: val('manufacturer_sale_salesperson_id'),
+      customer: [val('manufacturer_sale_customer_first_name'), val('manufacturer_sale_customer_last_name')].filter(Boolean).join(' '),
+      email: val('manufacturer_sale_email'),
+      phone: val('manufacturer_sale_primary_phone'),
+      phone2: val('manufacturer_sale_secondary_phone'),
+      delivery: addressLines('physical'),
+      mailing: usePhys ? null : addressLines('mailing'),
+      building: [
+        ['Manufacturer', val('manufacturer_sale_manufacturer_id')],
+        ['Style', val('manufacturer_sale_properties_structure_style')],
+        ['Size', val('manufacturer_sale_properties_structure_size')],
+        ['Height', clean(val('manufacturer_sale_properties_structure_height'))],
+        ['Material', clean(val('manufacturer_sale_properties_structure_construction_material'))],
+        ['Roof', clean(val('manufacturer_sale_properties_structure_roof_material'))],
+        ['Roof color', clean(val('manufacturer_sale_properties_structure_roof_color'))],
+        ['Stain', clean(val('manufacturer_sale_properties_structure_deck_stain'))],
+        ['Siding color', clean(val('manufacturer_sale_properties_structure_siding_color'))],
+        ['Trim color', clean(val('manufacturer_sale_properties_structure_trim_color'))],
+        ['Condition', clean(val('manufacturer_sale_properties_structure_condition')).replace(/^\w/, (c) => c.toUpperCase())],
+        ['Serial number', val('manufacturer_sale_properties_structure_serial_number')],
+        ['Est. delivery date', val('manufacturer_sale_estimated_delivery_date')],
+      ].filter((r) => r[1]),
+      notes: val('manufacturer_sale_notes'),
+      design: val('manufacturer_sale_properties_external_link_Deck Visualizer'),
+      base: num($('#manufacturer_sale_base_price')),
+      cash, rate, tax, total,
+      deposit: num($('#manufacturer_sale_initial_payment')),
+      due: num($('#manufacturer_sale_final_payment')),
+    };
+  }
+
+  function fmtDate(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+    if (!m) return new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  function buildQuotePdf(q) {
+    const JsPDF = (window.jspdf && window.jspdf.jsPDF) || (typeof jspdf !== 'undefined' && jspdf.jsPDF);
+    if (!JsPDF) throw new Error('PDF library did not load');
+    const doc = new JsPDF({ unit: 'pt', format: 'letter' });
+    const W = doc.internal.pageSize.getWidth(), M = 40;
+    const RED = [200, 16, 46], BLUE = [11, 61, 145], BLACK = [20, 20, 20];
+
+    // Header band
+    doc.setFillColor(...BLACK); doc.rect(0, 0, W, 78, 'F');
+    doc.setFillColor(...RED); doc.rect(0, 78, W, 5, 'F');
+    doc.setFillColor(...BLUE); doc.rect(0, 83, W, 3, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(24); doc.text('HINTON BUILDINGS', M, 40);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+    const lotLine = q.lot ? q.lot.label + ' lot: ' + q.lot.addr : '';
+    doc.text([lotLine, HINTON.phone + '  |  ' + HINTON.web].filter(Boolean), M, 56);
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(20); doc.text('QUOTE', W - M, 40, { align: 'right' });
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+    doc.text(['Quote #: ' + (q.number || '-'), 'Date: ' + fmtDate(q.date)], W - M, 56, { align: 'right' });
+
+    // Customer + salesperson blocks
+    doc.setTextColor(...BLACK);
+    let y = 112;
+    const col2 = W / 2 + 10;
+    const block = (title, lines, x) => {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...RED); doc.text(title, x, y);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...BLACK);
+      const wrapped = lines.filter(Boolean).flatMap((l) => doc.splitTextToSize(l, W / 2 - M - 10));
+      doc.text(wrapped, x, y + 15);
+      return y + 15 + wrapped.length * 12;
+    };
+    const custLines = [q.customer, q.phone, q.phone2, q.email, ...(q.delivery.length ? ['Delivery address:', ...q.delivery] : [])];
+    const leftEnd = block('CUSTOMER', custLines, M);
+    const dealerLines = [q.lot ? 'Hinton Buildings, ' + q.lot.label + ' lot' : q.dealer, q.salesperson ? 'Salesperson: ' + q.salesperson : '', ...(q.mailing ? ['Mailing address:', ...q.mailing] : [])];
+    const rightEnd = block('PREPARED BY', dealerLines, col2);
+    y = Math.max(leftEnd, rightEnd) + 14;
+
+    // Building details
+    doc.autoTable({
+      startY: y, margin: { left: M, right: M },
+      head: [['Building details', '']],
+      body: q.building,
+      theme: 'grid',
+      headStyles: { fillColor: BLUE, textColor: 255, fontStyle: 'bold' },
+      columnStyles: { 0: { cellWidth: 150, fontStyle: 'bold' } },
+      styles: { fontSize: 10, cellPadding: 5 },
+    });
+    y = doc.lastAutoTable.finalY + 14;
+
+    // Pricing
+    const m$ = (n) => (isNaN(n) ? '-' : '$' + money(n));
+    const body = [];
+    if (!isNaN(q.base) && q.base !== q.cash) body.push(['Base price', m$(q.base)]);
+    body.push(['Price before tax', m$(q.cash)]);
+    body.push(['Sales tax' + (isNaN(q.rate) ? '' : ' (' + q.rate.toFixed(2) + '%)'), m$(q.tax)]);
+    body.push(['Total', m$(q.total)]);
+    if (!isNaN(q.deposit) && q.deposit > 0) body.push(['Deposit', m$(q.deposit)]);
+    if (!isNaN(q.deposit) && q.deposit > 0 && !isNaN(q.total)) body.push(['Balance due at delivery', m$(round2(q.total - q.deposit))]);
+    doc.autoTable({
+      startY: y, margin: { left: M, right: M },
+      head: [['Pricing', 'Amount']],
+      body,
+      theme: 'grid',
+      headStyles: { fillColor: RED, textColor: 255, fontStyle: 'bold' },
+      columnStyles: { 1: { halign: 'right', cellWidth: 140 } },
+      styles: { fontSize: 11, cellPadding: 6 },
+      didParseCell: (d) => { if (d.section === 'body' && d.row.raw[0] === 'Total') { d.cell.styles.fontStyle = 'bold'; d.cell.styles.fillColor = [238, 238, 238]; } },
+    });
+    y = doc.lastAutoTable.finalY + 18;
+
+    if (q.notes) {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(...RED); doc.text('NOTES', M, y);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(...BLACK);
+      const n = doc.splitTextToSize(q.notes, W - 2 * M); doc.text(n, M, y + 14); y += 14 + n.length * 12 + 8;
+    }
+    if (q.design && /^https?:/i.test(q.design)) {
+      doc.setFontSize(10); doc.setTextColor(...BLUE);
+      doc.textWithLink('View your deck design online', M, y, { url: q.design }); y += 16;
+    }
+
+    // Footer
+    const H = doc.internal.pageSize.getHeight();
+    doc.setDrawColor(...RED); doc.setLineWidth(1.5); doc.line(M, H - 54, W - M, H - 54);
+    doc.setFontSize(9); doc.setTextColor(90, 90, 90);
+    doc.text('Thank you for choosing Hinton Buildings. Questions? Call ' + HINTON.phone + ' or visit ' + HINTON.web + '.', W / 2, H - 38, { align: 'center' });
+    return doc;
+  }
+
+  function makeQuote() {
+    try {
+      const q = collectQuote();
+      const doc = buildQuotePdf(q);
+      const who = (q.customer || 'customer').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      doc.save('Hinton-Quote-' + who + (q.number ? '-' + q.number : '') + '.pdf');
+    } catch (e) {
+      alert('Could not create the quote PDF: ' + e.message);
+    }
+  }
+
+  function addQuoteButton() {
+    if (document.getElementById('hb-quote-btn')) return;
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.id = 'hb-quote-btn'; btn.textContent = 'Create quote PDF';
+    btn.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:99999;background:#141414;color:#fff;border:3px solid #c8102e;border-radius:8px;padding:12px 18px;font-size:16px;font-weight:bold;min-height:44px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.3);';
+    btn.addEventListener('click', makeQuote);
+    document.body.appendChild(btn);
+  }
+
   // ---------- init ----------
   function init() {
     const deposit = $('#manufacturer_sale_initial_payment');
@@ -617,6 +822,7 @@
     }
 
     countyDropdown();
+    addQuoteButton();
     addSerialButton();
     applySerial(false);
     setTimeout(applyDeposit, 300);
